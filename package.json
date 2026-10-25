@@ -1,0 +1,58 @@
+{
+  "name": "agent-writeguard",
+  "version": "0.1.0",
+  "description": "Non-idempotent action, dry-run attestation, atomic O_EXCL lock, read-back verification, and STOP kill-switch harness for AI agents.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Anass Kabil <contact@pullmesh.com>",
+  "homepage": "https://pullmesh.com/services/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anassk01/agent-writeguard.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./errors": "./src/errors.js",
+    "./fingerprint": "./src/fingerprint.js",
+    "./policies": "./src/policies.js"
+  },
+  "bin": {
+    "writeguard": "./bin/writeguard.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "types",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "smoke:sdk": "node examples/stripe-payout-sdk.mjs",
+    "smoke:mcp": "node examples/mcp-tool-wrapper.mjs",
+    "smoke:browser": "node examples/playwright-publish-guard.mjs"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "idempotency",
+    "safety",
+    "dry-run",
+    "attestation",
+    "kill-switch",
+    "playwright",
+    "n8n",
+    "automation",
+    "guardrails",
+    "agent-safety"
+  ]
+}

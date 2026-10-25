@@ -1,0 +1,5 @@
+node_modules/
+.writeguard/
+*.log
+.DS_Store
+coverage/
