@@ -150,3 +150,170 @@ export function shouldTripOnError(error, config = DEFAULT_KILL_SWITCH_CONFIG) {
 
   return { shouldTrip: false };
 }
+
+async function loadLedgerForDay(stateDir, dayKey) {
+  const paths = resolveStatePaths(stateDir);
+  const existing = await readJsonIfExists(paths.capsPath);
+  if (!existing || existing.dayKey !== dayKey) {
+    return {
+      dayKey,
+      counts: {},
+      totalSpend: 0,
+      rolledOverFrom: existing?.dayKey || null,
+      updatedAt: null,
+    };
+  }
+  return {
+    dayKey: existing.dayKey,
+    counts: { ...(existing.counts || {}) },
+    totalSpend: Number(existing.totalSpend || 0),
+    rolledOverFrom: existing.rolledOverFrom || null,
+    updatedAt: existing.updatedAt || null,
+  };
+}
+
+function resolveLimitForAction(caps = {}, action) {
+  if (Object.prototype.hasOwnProperty.call(caps, action)) {
+    return caps[action];
+  }
+  if (Object.prototype.hasOwnProperty.call(caps, '*')) {
+    return caps['*'];
+  }
+  return null;
+}
+
+/**
+ * Checks whether an action (and optional spend amount) is within today's local-day cap.
+ * Automatically rolls over counters when the local date advances.
+ *
+ * @param {string} stateDir
+ * @param {{ action: string, amount?: number, caps?: Record<string, number>, maxDailySpend?: number, now?: Date, timeZone?: string }} options
+ */
+export async function checkCap(
+  stateDir,
+  { action, amount = 0, caps = {}, maxDailySpend, now = new Date(), timeZone } = {},
+) {
+  const dayKey = getLocalDayKey(now, timeZone);
+  const ledger = await loadLedgerForDay(stateDir, dayKey);
+  const used = Number(ledger.counts[action] || 0);
+  const limit = resolveLimitForAction(caps, action);
+  const spendAmount = Number(amount || 0);
+
+  if (limit !== null && limit !== undefined && used + 1 > limit) {
+    return {
+      allowed: false,
+      code: ERROR_CODES.ERR_DAILY_CAP_EXCEEDED,
+      dayKey,
+      action,
+      used,
+      limit,
+      remaining: Math.max(0, limit - used),
+      totalSpend: ledger.totalSpend,
+      maxDailySpend: maxDailySpend ?? null,
+      reason: `Daily cap exceeded for "${action}": ${used}/${limit} used on ${dayKey}.`,
+    };
+  }
+
+  if (
+    typeof maxDailySpend === 'number' &&
+    Number.isFinite(maxDailySpend) &&
+    spendAmount > 0 &&
+    ledger.totalSpend + spendAmount > maxDailySpend
+  ) {
+    return {
+      allowed: false,
+      code: ERROR_CODES.ERR_SPEND_CEILING_EXCEEDED,
+      dayKey,
+      action,
+      used,
+      limit,
+      remaining: limit !== null && limit !== undefined ? Math.max(0, limit - used) : null,
+      totalSpend: ledger.totalSpend,
+      projectedSpend: ledger.totalSpend + spendAmount,
+      maxDailySpend,
+      reason: `Daily spend ceiling exceeded on ${dayKey}: projected ${ledger.totalSpend + spendAmount} > limit ${maxDailySpend}.`,
+    };
+  }
+
+  return {
+    allowed: true,
+    dayKey,
+    action,
+    used,
+    limit,
+    remaining: limit !== null && limit !== undefined ? Math.max(0, limit - used) : null,
+    totalSpend: ledger.totalSpend,
+    maxDailySpend: maxDailySpend ?? null,
+  };
+}
+
+/**
+ * Checks and records one unit of daily cap usage (plus optional spend) atomically.
+ *
+ * @param {string} stateDir
+ * @param {{ action: string, amount?: number, caps?: Record<string, number>, maxDailySpend?: number, tripOnSpendCeiling?: boolean, now?: Date, timeZone?: string }} options
+ */
+export async function consumeCap(
+  stateDir,
+  { action, amount = 0, caps = {}, maxDailySpend, tripOnSpendCeiling = false, now = new Date(), timeZone } = {},
+) {
+  const paths = await ensureStateDirs(stateDir);
+  const status = await checkCap(stateDir, { action, amount, caps, maxDailySpend, now, timeZone });
+  if (!status.allowed) {
+    if (status.code === ERROR_CODES.ERR_SPEND_CEILING_EXCEEDED && tripOnSpendCeiling) {
+      await tripKillSwitch(stateDir, {
+        reason: status.reason,
+        signal: 'SPEND_CEILING',
+        now,
+      });
+    }
+    throw new WriteGuardError(status.code, status.reason, { details: status });
+  }
+
+  const dayKey = status.dayKey;
+  const ledger = await loadLedgerForDay(stateDir, dayKey);
+  const spendAmount = Number(amount || 0);
+  ledger.counts[action] = Number(ledger.counts[action] || 0) + 1;
+  ledger.totalSpend = Number((ledger.totalSpend + spendAmount).toFixed(6));
+  ledger.updatedAt = now.toISOString();
+
+  await atomicWriteJson(paths.capsPath, ledger, 0o600);
+  return {
+    dayKey,
+    action,
+    used: ledger.counts[action],
+    limit: status.limit,
+    remaining: status.limit !== null && status.limit !== undefined ? Math.max(0, status.limit - ledger.counts[action]) : null,
+    totalSpend: ledger.totalSpend,
+    maxDailySpend: maxDailySpend ?? null,
+  };
+}
+
+/**
+ * Returns current local-day quota usage across all tracked & configured actions.
+ *
+ * @param {string} stateDir
+ * @param {{ caps?: Record<string, number>, maxDailySpend?: number, now?: Date, timeZone?: string }} [options]
+ */
+export async function getCapsStatus(stateDir, { caps = {}, maxDailySpend = null, now = new Date(), timeZone } = {}) {
+  const dayKey = getLocalDayKey(now, timeZone);
+  const ledger = await loadLedgerForDay(stateDir, dayKey);
+  const actionNames = new Set([...Object.keys(caps || {}), ...Object.keys(ledger.counts || {})]);
+  const actions = {};
+  for (const name of [...actionNames].sort()) {
+    const used = Number(ledger.counts[name] || 0);
+    const limit = resolveLimitForAction(caps, name);
+    actions[name] = {
+      used,
+      limit,
+      remaining: limit !== null && limit !== undefined ? Math.max(0, limit - used) : null,
+    };
+  }
+  return {
+    dayKey,
+    totalSpend: ledger.totalSpend,
+    maxDailySpend: maxDailySpend ?? null,
+    rolledOverFrom: ledger.rolledOverFrom,
+    actions,
+  };
+}
