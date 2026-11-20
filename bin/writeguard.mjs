@@ -250,6 +250,149 @@ async function main() {
     return;
   }
 
+  if (command === 'guard') {
+    if (execArgs.length === 0) {
+      throw new WriteGuardError(
+        ERROR_CODES.ERR_INVALID_ARGUMENT,
+        'guard requires a command after "--". Example: writeguard guard --action ... --verify-cmd "..." -- node payout.mjs',
+      );
+    }
+    const action = flags.action;
+    const target = flags.target;
+    const payload = await loadPayload(flags);
+    const amount = flags.amount !== undefined ? Number(flags.amount) : 0;
+    const verifyCmd = typeof flags['verify-cmd'] === 'string' ? flags['verify-cmd'] : null;
+    const unsafeSkipReadback = Boolean(flags['unsafe-skip-readback']);
+    const timeoutMs = flags.timeout ? Number(flags.timeout) : 0;
+
+    if (!unsafeSkipReadback && !verifyCmd) {
+      throw new WriteGuardError(
+        ERROR_CODES.ERR_READBACK_REQUIRED,
+        'guard requires --verify-cmd "<shell command>" for read-back verification (or pass --unsafe-skip-readback).',
+      );
+    }
+
+    const result = await guard.guardWrite({
+      actionKey: typeof flags.key === 'string' ? flags.key : undefined,
+      action,
+      target,
+      payload,
+      attestationId: typeof flags.attestation === 'string' ? flags.attestation : null,
+      identity: typeof flags.identity === 'string' ? flags.identity : undefined,
+      amount,
+      requireAttestation: flags['no-attestation'] ? false : undefined,
+      allowReconciledRetry: Boolean(flags['allow-reconciled-retry']),
+      unsafeSkipReadback,
+      execute: async ({ lock }) => {
+        const res = await runSubprocess(execArgs[0], execArgs.slice(1), {
+          timeoutMs,
+          env: {
+            WRITEGUARD_ACTION: lock.action,
+            WRITEGUARD_TARGET: lock.target,
+            WRITEGUARD_KEY: lock.actionKey,
+            WRITEGUARD_FINGERPRINT: lock.fingerprint,
+            WRITEGUARD_PAYLOAD: JSON.stringify(payload),
+          },
+        });
+        if (res.timedOut) {
+          const err = new Error(`Command timed out after ${timeoutMs}ms`);
+          err.stdout = res.stdout;
+          err.stderr = res.stderr;
+          throw err;
+        }
+        if (res.code !== 0) {
+          const err = new Error(`Command exited with status ${res.code}${res.stderr ? `: ${res.stderr}` : ''}`);
+          err.stdout = res.stdout;
+          err.stderr = res.stderr;
+          throw err;
+        }
+        return { exitCode: res.code, stdout: res.stdout, stderr: res.stderr };
+      },
+      verifyReadback: verifyCmd
+        ? async ({ record, context }) => {
+            const verifyRes = await runSubprocess(verifyCmd, [], {
+              shell: true,
+              env: {
+                WRITEGUARD_ACTION: record.action,
+                WRITEGUARD_TARGET: record.target,
+                WRITEGUARD_KEY: record.actionKey,
+                WRITEGUARD_EXEC_STDOUT: context?.result?.stdout || '',
+              },
+            });
+            if (verifyRes.code === 0) {
+              return { verified: true, evidence: { stdout: verifyRes.stdout || 'exit 0' } };
+            }
+            return {
+              verified: false,
+              reason: `Read-back command exited with ${verifyRes.code}: ${verifyRes.stderr || verifyRes.stdout}`,
+            };
+          }
+        : undefined,
+    });
+
+    output(result, asJson, (r) =>
+      [
+        `COMMITTED_VERIFIED: ${r.record.actionKey}`,
+        `  action:   ${r.record.action}`,
+        `  target:   ${r.record.target}`,
+        `  verified: ${r.record.verifiedAt}`,
+        r.result?.stdout ? `  stdout:   ${r.result.stdout}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+    return;
+  }
+
+  if (command === 'reconcile') {
+    const actionKey = flags.key;
+    const operator = typeof flags.operator === 'string' ? flags.operator : 'cli-operator';
+    const verifyCmd = typeof flags['verify-cmd'] === 'string' ? flags['verify-cmd'] : null;
+
+    let updated;
+    if (verifyCmd) {
+      updated = await guard.reconcile(
+        actionKey,
+        async ({ record }) => {
+          const res = await runSubprocess(verifyCmd, [], {
+            shell: true,
+            env: {
+              WRITEGUARD_ACTION: record.action,
+              WRITEGUARD_TARGET: record.target,
+              WRITEGUARD_KEY: record.actionKey,
+            },
+          });
+          return {
+            applied: res.code === 0,
+            evidence: res.stdout || res.stderr || `verify-cmd exit=${res.code}`,
+          };
+        },
+        { operator },
+      );
+    } else {
+      const applied = Boolean(flags.applied);
+      const notApplied = Boolean(flags['not-applied']);
+      if (applied === notApplied) {
+        throw new WriteGuardError(
+          ERROR_CODES.ERR_INVALID_ARGUMENT,
+          'reconcile requires exactly one of --applied, --not-applied, or --verify-cmd "<cmd>".',
+        );
+      }
+      const evidence = typeof flags.evidence === 'string' ? flags.evidence : '';
+      updated = await guard.reconcile(actionKey, { applied, evidence }, { operator });
+    }
+
+    output(updated, asJson, (r) =>
+      [
+        `Reconciled: ${r.actionKey}`,
+        `  state:    ${r.state}`,
+        `  operator: ${r.reconciledBy}`,
+        `  evidence: ${typeof r.verificationEvidence === 'string' ? r.verificationEvidence : JSON.stringify(r.verificationEvidence)}`,
+      ].join('\n'),
+    );
+    return;
+  }
+
   throw new WriteGuardError(ERROR_CODES.ERR_INVALID_ARGUMENT, `Unknown command "${command}". Run "writeguard --help".`);
 }
 
