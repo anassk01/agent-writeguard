@@ -393,6 +393,85 @@ async function main() {
     return;
   }
 
+  if (command === 'status') {
+    const snap = await guard.status(typeof flags.key === 'string' ? flags.key : undefined);
+    output(snap, asJson, (s) => {
+      const lines = [
+        `WriteGuard Status (${s.stateDir})`,
+        `  killSwitch: ${s.stopped ? `ACTIVE (${s.killSwitch.signal}: ${s.killSwitch.reason})` : 'clear'}`,
+        `  identity:   ${s.identity.bound ? `bound (${s.identity.label}, ${s.identity.hashPrefix}...)` : 'unbound'}`,
+        `  dayKey:     ${s.caps.dayKey} (spend: ${s.caps.totalSpend}${s.caps.maxDailySpend !== null ? `/${s.caps.maxDailySpend}` : ''})`,
+        `  locks:      total=${s.summary.total} verified=${s.summary.committed_verified} unknown=${s.summary.outcome_unknown} pending=${s.summary.pending} aborted=${s.summary.reconciled_aborted}`,
+      ];
+      for (const r of s.records) {
+        lines.push(`    - ${r.actionKey} [${r.state}] ${r.action} -> ${r.target}`);
+      }
+      return lines.join('\n');
+    });
+    return;
+  }
+
+  if (command === 'stop') {
+    if (flags.clear) {
+      const cleared = await guard.clearKillSwitch({
+        operator: typeof flags.operator === 'string' ? flags.operator : 'cli-operator',
+        reason: typeof flags.reason === 'string' ? flags.reason : 'Cleared via CLI',
+      });
+      output(cleared, asJson, (c) =>
+        c.cleared ? `Kill switch CLEARED (previous signal=${c.previous.signal}).` : 'Kill switch was not active.',
+      );
+      return;
+    }
+    const tripped = await guard.tripKillSwitch({
+      reason: typeof flags.reason === 'string' ? flags.reason : 'Manual STOP via CLI',
+      signal: typeof flags.signal === 'string' ? flags.signal : 'CLI_STOP',
+    });
+    output(tripped, asJson, (t) => `STOP KILL SWITCH ACTIVE (${t.signal}): ${t.reason}`);
+    return;
+  }
+
+  if (command === 'caps') {
+    if ((multiFlags.set && multiFlags.set.length > 0) || flags['max-spend'] !== undefined) {
+      const updatedCaps = { ...guard.caps, ...parseCapPairs(multiFlags.set || []) };
+      const maxDailySpend = flags['max-spend'] !== undefined ? Number(flags['max-spend']) : guard.maxDailySpend;
+      await guard.init({ caps: updatedCaps, maxDailySpend });
+    }
+    const status = await guard.getCaps();
+    output(status, asJson, (c) => {
+      const lines = [
+        `Daily Caps (${c.dayKey})`,
+        `  totalSpend: ${c.totalSpend}${c.maxDailySpend !== null ? ` / ${c.maxDailySpend}` : ''}`,
+      ];
+      for (const [name, info] of Object.entries(c.actions)) {
+        lines.push(`  ${name}: ${info.used}/${info.limit ?? 'unlimited'}`);
+      }
+      return lines.join('\n');
+    });
+    return;
+  }
+
+  if (command === 'identity') {
+    if (typeof flags.bind === 'string') {
+      const bound = await guard.bindIdentity({
+        identity: flags.bind,
+        label: typeof flags.label === 'string' ? flags.label : 'default',
+        force: Boolean(flags.force),
+      });
+      output(bound, asJson, (b) => `Identity bound: label=${b.label}, hash=${b.hashPrefix}...`);
+      return;
+    }
+    if (typeof flags.verify === 'string') {
+      const verified = await guard.assertIdentity(flags.verify);
+      output(verified, asJson, (v) => `Identity verified: label=${v.label}, hash=${v.hashPrefix}...`);
+      return;
+    }
+    const snap = await guard.status();
+    output(snap.identity, asJson, (id) =>
+      id.bound ? `Identity bound: label=${id.label}, hash=${id.hashPrefix}...` : 'Identity: unbound',
+    );
+    return;
+  }
+
   throw new WriteGuardError(ERROR_CODES.ERR_INVALID_ARGUMENT, `Unknown command "${command}". Run "writeguard --help".`);
 }
 
