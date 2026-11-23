@@ -224,3 +224,9 @@ Runs the full `node --test` unit, concurrency (`O_EXCL` race), policy/PII, rollo
 
 ---
 
+Built by [PullMesh](https://pullmesh.com/services/) — production AI workflow automation, custom MCP integrations, and reliable browser & data pipelines. Technical write-ups on [DEV.to (`anasbuilds997`)](https://dev.to/anasbuilds997).
+
+### Companion Open-Source Repositories
+
+- [`anassk01/camoufox-browser-use`](https://github.com/anassk01/camoufox-browser-use) — CDP-free Firefox/Camoufox Playwright backend for `browser-use`
+- [`anassk01/playwright-resilient-portal-bot`](https://github.com/anassk01/playwright-resilient-portal-bot) — Resilient Playwright portal automation with retry recovery and read-back verification
